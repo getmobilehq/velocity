@@ -1,0 +1,252 @@
+API Endpoint Documentation for Velocity CRM -  WhatsApp Sales Follow-Up System
+=============================================================
+
+Base URL
+--------
+- url/sales
+
+Authentication
+--------------
+- JWT Token: Required for dashboard endpoints (/auth/*, /sales/dashboard/*, /sales/users). Generated via /auth/login and passed in the Authorization header as Bearer <token>.
+- Bot Endpoints: No authentication required (/sales, /sales/followups), as the WhatsApp bot operates independently.
+
+1. POST /auth/login
+-------------------
+Purpose: Authenticate admin or sales team members and return a JWT token.
+Method: POST
+Headers: None
+Request Body:
+{
+  "username": "admin1",
+  "password": "adminpass"
+}
+
+SQL Query:
+SELECT id, username, role, password FROM Users WHERE username = ?;
+Logic:
+- Verify password against stored hash (e.g., using bcrypt).
+- Generate JWT with id and role (e.g., { "id": 1, "role": "admin" }).
+
+Response (200 OK):
+{
+  "token": "jwt.token.here",
+  "role": "admin"
+}
+Errors:
+- 401 Unauthorized: Invalid credentials.
+  { "error": "Invalid username or password" }
+
+
+
+
+
+
+2. GET /sales?phone={phone}&trigger={trigger}
+---------------------------------------------
+Purpose: Fetch the next bot message for the WhatsApp bot based on lead’s status, decision, and user input (trigger).
+Method: GET
+Headers: None (public endpoint for bot).
+Query Parameters:
+- phone: Lead’s phone number (e.g., +1234567890).
+- trigger: User response or follow-up trigger (e.g., COURSE1, FOLLOWUP).
+
+SQL Query:
+SELECT l.fullname, bm.message, bm.next_status, bm.next_decision, c.name AS course_name, c.start_date, c.payment_link, c.access_link
+FROM Leads l
+LEFT JOIN Courses c ON l.course_id = c.id
+JOIN BotMessages bm ON l.status = bm.status AND l.decision = bm.decision AND (bm.trigger = ? OR (bm.trigger IS NULL AND ? IS NULL))
+WHERE l.phone = ?
+LIMIT 1;
+
+Response (200 OK):
+{
+  "fullname": "Sarah Lee",
+  "message": "Great choice, [FULLNAME]! [Course Name] starts [Start Date]. Reply ‘INFO’ or ‘JOIN’.",
+  "next_status": "Engaged Lead",
+  "next_decision": null,
+  "course_name": "COURSE1",
+  "start_date": "2025-03-01",
+  "payment_link": "payment.link/course1",
+  "access_link": "course1.access.link"
+}
+Errors:
+- 404 Not Found: Lead not found.
+  { "error": "Lead not found" }
+
+3. POST /sales
+--------------
+Purpose: Update lead state and log conversation after bot interaction.
+Method: POST
+Headers: None (public endpoint for bot).
+Request Body:
+{
+  "phone": "+1234567890",
+  "message": "COURSE1",
+  "direction": "received",
+  "status": "Engaged Lead",
+  "course_id": 1,
+  "decision": "Still Interested"
+}
+SQL Queries:
+1. INSERT INTO Conversations (lead_id, message, direction)
+   SELECT id, ?, ? FROM Leads WHERE phone = ?;
+2. UPDATE Leads
+   SET status = ?, course_id = ?, decision = ?, last_message_time = NOW()
+   WHERE phone = ?;
+
+Response (201 Created or 200 OK):
+{ "message": "Lead updated" }
+Errors:
+- 400 Bad Request: Invalid data.
+  { "error": "Missing required fields" }
+
+4. GET /sales/followups
+-----------------------
+Purpose: Fetch leads requiring follow-up messages for the bot to send.
+Method: GET
+Headers: None (public endpoint for bot).
+
+SQL Query:
+SELECT l.phone, l.fullname, bm.message, c.name AS course_name, c.payment_link, c.access_link
+FROM Leads l
+LEFT JOIN Courses c ON l.course_id = c.id
+JOIN BotMessages bm ON l.status = bm.status AND l.decision = bm.decision AND bm.trigger = 'FOLLOWUP'
+WHERE DATEDIFF(NOW(), l.last_message_time) >= bm.days_after
+AND l.last_message_time IS NOT NULL;
+
+Response (200 OK):
+[
+  {
+    "phone": "+1234567890",
+    "fullname": "Sarah Lee",
+    "message": "Hey [FULLNAME], still there? Reply ‘COURSE1’, ‘COURSE2’, or ‘LIST’!",
+    "course_name": null,
+    "payment_link": null,
+    "access_link": null
+  }
+]
+Errors: None (returns empty array if no follow-ups).
+
+5. GET /sales/dashboard/leads
+-----------------------------
+Purpose: Fetch leads for the admin/sales dashboard, filtered by role.
+Method: GET
+Headers:
+- Authorization: Bearer jwt.token.here
+Query Parameters (Optional):
+- status: Filter by status (e.g., New Lead).
+- decision: Filter by decision (e.g., Still Interested).
+
+SQL Query:
+SELECT l.phone, l.fullname, l.status, l.decision, l.payment_status, c.name AS course_name, l.last_message_time
+FROM Leads l
+LEFT JOIN Courses c ON l.course_id = c.id
+WHERE (? = 'admin' OR (l.status IN ('Engaged Lead', 'Qualified Lead') AND ? = 'sales'))
+AND (l.status = ? OR ? IS NULL)
+AND (l.decision = ? OR ? IS NULL);
+
+Response (200 OK):
+[
+  {
+    "phone": "+1234567890",
+    "fullname": "Sarah Lee",
+    "status": "New Lead",
+    "decision": "Still Interested",
+    "payment_status": "Not Paid",
+    "course_name": null,
+    "last_message_time": "2025-02-21 10:00:00"
+  }
+]
+Errors:
+- 401 Unauthorized: Missing or invalid token.
+  { "error": "Unauthorized" }
+
+6. POST /sales/users
+--------------------
+Purpose: Create a new admin or sales user (admin only).
+Method: POST
+Headers:
+- Authorization: Bearer jwt.token.here
+Request Body:
+{
+  "username": "sales2",
+  "password": "salespass2",
+  "role": "sales",
+  "email": "sales2@example.com"
+}
+
+SQL Query:
+INSERT INTO Users (username, password, role, email)
+VALUES (?, ?, ?, ?);
+Logic:
+- Check req.user.role === 'admin'.
+- Hash password before insertion.
+
+Response (201 Created):
+{
+  "message": "User created",
+  "user_id": 2
+}
+Errors:
+- 401 Unauthorized: Non-admin user.
+  { "error": "Admin access required" }
+- 409 Conflict: Username/email already exists.
+  { "error": "Username or email already in use" }
+
+7. GET /sales/dashboard/conversations?phone={phone}
+---------------------------------------------------
+Purpose: Fetch conversation history for a specific lead (admin/sales dashboard).
+Method: GET
+Headers:
+- Authorization: Bearer jwt.token.here
+Query Parameters:
+- phone: Lead’s phone number (e.g., +1234567890).
+
+SQL Query:
+SELECT c.message, c.direction, c.timestamp
+FROM Conversations c
+JOIN Leads l ON c.lead_id = l.id
+WHERE l.phone = ?
+ORDER BY c.timestamp ASC;
+Response (200 OK):
+[
+  {
+    "message": "Hi Sarah, thanks for your interest! Reply with a course: ‘COURSE1’, ‘COURSE2’, or ‘LIST’.",
+    "direction": "sent",
+    "timestamp": "2025-02-21 10:00:00"
+  },
+  {
+    "message": "COURSE1",
+    "direction": "received",
+    "timestamp": "2025-02-21 10:01:00"
+  }
+]
+Errors:
+- 401 Unauthorized: Missing/invalid token.
+  { "error": "Unauthorized" }
+- 404 Not Found: Lead not found.
+  { "error": "Lead not found" }
+
+Implementation Notes
+--------------------
+Authentication Middleware (Example in Express):
+const jwt = require('jsonwebtoken');
+function authMiddleware(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    req.user = jwt.verify(token, 'your-secret-key');
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+Password Hashing (Example for POST /sales/users):
+const bcrypt = require('bcrypt');
+const hashedPassword = await bcrypt.hash(req.body.password, 10);
+
+Bot Flow: @openwa bot calls GET /sales for each message and POST /sales to update state, with a cron job for GET /sales/followups.
+
+Dashboard: Admin sees all leads; sales sees only Engaged Lead and Qualified Lead statuses for follow-up focus.
+
